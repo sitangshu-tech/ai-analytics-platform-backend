@@ -14,7 +14,25 @@ const adminRoutes = require("./routes/adminRoutes");
 
 const app = express();
 app.use(helmet());
-app.use(cors({ origin: process.env.FRONTEND_URL || "*" }));
+const normalizeOrigin = (origin = "") => origin.replace(/\/+$/, "").toLowerCase();
+const allowedOrigins = (process.env.FRONTEND_URL || "")
+  .split(",")
+  .map((origin) => normalizeOrigin(origin.trim()))
+  .filter(Boolean);
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      // Allow non-browser clients and same-origin server calls.
+      if (!origin) return callback(null, true);
+      if (!allowedOrigins.length) return callback(null, true);
+
+      const requestOrigin = normalizeOrigin(origin);
+      if (allowedOrigins.includes(requestOrigin)) return callback(null, true);
+
+      return callback(new Error("CORS blocked for this origin"));
+    },
+  })
+);
 app.use(express.json({ limit: "10mb" }));
 app.use(morgan("dev"));
 app.use(rateLimit({ windowMs: 15 * 60 * 1000, max: 300 }));

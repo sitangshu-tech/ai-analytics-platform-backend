@@ -8,6 +8,7 @@ const { createOtp, verifyOtp } = require("../utils/otpStore");
 const auth = require("../middleware/auth");
 
 const router = express.Router();
+const normalizeEmail = (value = "") => value.trim().toLowerCase();
 
 async function sendOtpEmail({ email, otp, tempPassword }) {
   const {
@@ -46,7 +47,7 @@ async function sendOtpEmail({ email, otp, tempPassword }) {
 }
 
 router.post("/send-otp", async (req, res) => {
-  const { email } = req.body;
+  const email = normalizeEmail(req.body?.email);
   if (!email) return res.status(400).json({ message: "Email required" });
   // Signup OTP only (sign-in uses password).
   const purpose = "register";
@@ -65,7 +66,8 @@ router.post("/send-otp", async (req, res) => {
 
 // Verify signup OTP -> create account and sign in
 router.post("/register/verify", async (req, res) => {
-  const { email, otp } = req.body;
+  const email = normalizeEmail(req.body?.email);
+  const otp = (req.body?.otp || "").toString().trim();
   if (!email) return res.status(400).json({ message: "Email required" });
   if (!otp) return res.status(400).json({ message: "OTP required" });
 
@@ -96,7 +98,8 @@ router.post("/register/verify", async (req, res) => {
 
 // Sign in with email + password only
 router.post("/login", async (req, res) => {
-  const { email, password } = req.body;
+  const email = normalizeEmail(req.body?.email);
+  const password = (req.body?.password || "").toString();
   if (!email || !password) return res.status(400).json({ message: "Email and password required" });
 
   const userRes = await pool.query("SELECT id,email,password,role,is_blocked,subscription_plan FROM users WHERE email=$1", [email]);
@@ -104,7 +107,19 @@ router.post("/login", async (req, res) => {
   if (!user) return res.status(401).json({ message: "Invalid credentials" });
   if (user.is_blocked) return res.status(403).json({ message: "User blocked" });
 
-  const ok = await bcrypt.compare(password, user.password);
+  let ok = false;
+  if (typeof user.password === "string" && user.password.length) {
+    // Support legacy plaintext passwords and upgrade them to bcrypt on next successful sign-in.
+    if (user.password.startsWith("$2a$") || user.password.startsWith("$2b$") || user.password.startsWith("$2y$")) {
+      ok = await bcrypt.compare(password, user.password);
+    } else {
+      ok = password === user.password;
+      if (ok) {
+        const newHash = await bcrypt.hash(password, 10);
+        await pool.query("UPDATE users SET password=$1 WHERE id=$2", [newHash, user.id]);
+      }
+    }
+  }
   if (!ok) return res.status(401).json({ message: "Invalid credentials" });
 
   const token = jwt.sign(
