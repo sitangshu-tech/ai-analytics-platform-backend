@@ -15,6 +15,7 @@ const adminRoutes = require("./routes/adminRoutes");
 const app = express();
 app.use(helmet());
 const normalizeOrigin = (origin = "") => origin.replace(/\/+$/, "").toLowerCase();
+const isLocalOrigin = (origin = "") => /^https?:\/\/localhost(?::\d+)?$/i.test(origin);
 const allowedOrigins = (process.env.FRONTEND_URL || "")
   .split(",")
   .map((origin) => normalizeOrigin(origin.trim()))
@@ -24,9 +25,10 @@ app.use(
     origin: (origin, callback) => {
       // Allow non-browser clients and same-origin server calls.
       if (!origin) return callback(null, true);
-      if (!allowedOrigins.length) return callback(null, true);
-
       const requestOrigin = normalizeOrigin(origin);
+      if (isLocalOrigin(requestOrigin)) return callback(null, true);
+      if (requestOrigin.endsWith(".vercel.app")) return callback(null, true);
+      if (!allowedOrigins.length) return callback(null, true);
       if (allowedOrigins.includes(requestOrigin)) return callback(null, true);
 
       return callback(new Error("CORS blocked for this origin"));
