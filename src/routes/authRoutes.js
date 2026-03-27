@@ -26,29 +26,52 @@ async function sendOtpEmail({ email, otp, tempPassword }) {
     return { sent: false, otp: null };
   }
 
-  const transporter = nodemailer.createTransport({
-    host: SMTP_HOST,
-    port: Number(SMTP_PORT),
-    secure: Number(SMTP_PORT) === 465,
-    auth: { user: SMTP_USER, pass: SMTP_PASS },
-    // Fail fast instead of hanging a long time on bad connectivity.
-    connectionTimeout: 10000,
-    greetingTimeout: 10000,
-    socketTimeout: 15000,
-    // Force IPv4 for environments that can't route IPv6 (prevents ENETUNREACH).
-    lookup: (hostname, _opts, cb) => dns.lookup(hostname, { family: 4 }, cb),
-  });
+  const createTransporter = ({ host, port, secure }) =>
+    nodemailer.createTransport({
+      host,
+      port,
+      secure,
+      auth: { user: SMTP_USER, pass: SMTP_PASS },
+      // Fail fast instead of hanging a long time on bad connectivity.
+      connectionTimeout: 10000,
+      greetingTimeout: 10000,
+      socketTimeout: 15000,
+      // Force IPv4 for environments that can't route IPv6 (prevents ENETUNREACH).
+      lookup: (hostname, _opts, cb) => dns.lookup(hostname, { family: 4 }, cb),
+    });
 
-  try {
-    await transporter.sendMail({
+  const sendMail = (transporter) =>
+    transporter.sendMail({
       from: SMTP_FROM,
       to: email,
       subject: "Your signup OTP",
       text: `Your signup OTP is: ${otp}. It expires in 10 minutes.\n\nTemporary password: ${tempPassword}\n\nPlease change it after login.`,
     });
+
+  try {
+    const primaryPort = Number(SMTP_PORT);
+    const primary = createTransporter({ host: SMTP_HOST, port: primaryPort, secure: primaryPort === 465 });
+    await sendMail(primary);
     return { sent: true, otp: null };
   } catch (e) {
-    console.error("sendOtpEmail error:", e?.message || e);
+    const message = e?.message || String(e);
+    const isTimeout = /timeout/i.test(message);
+    const primaryPort = Number(SMTP_PORT);
+
+    // Common fix: if STARTTLS (587) times out, retry implicit TLS (465).
+    if (isTimeout && primaryPort !== 465) {
+      try {
+        const fallback = createTransporter({ host: SMTP_HOST, port: 465, secure: true });
+        await sendMail(fallback);
+        return { sent: true, otp: null };
+      } catch (e2) {
+        console.error("sendOtpEmail error:", e2?.message || e2);
+        if (devOtpReturnEnabled) return { sent: false, otp };
+        return { sent: false, otp: null };
+      }
+    }
+
+    console.error("sendOtpEmail error:", message);
     if (devOtpReturnEnabled) return { sent: false, otp };
     return { sent: false, otp: null };
   }
