@@ -8,6 +8,7 @@ const { createOtp, verifyOtp } = require("../utils/otpStore");
 const auth = require("../middleware/auth");
 
 const router = express.Router();
+const devOtpReturnEnabled = String(process.env.DEV_OTP_RETURN || "").toLowerCase() === "true";
 const normalizeEmail = (value = "") => value.trim().toLowerCase();
 
 async function sendOtpEmail({ email, otp, tempPassword }) {
@@ -20,7 +21,7 @@ async function sendOtpEmail({ email, otp, tempPassword }) {
   } = process.env;
 
   if (!SMTP_HOST || !SMTP_PORT || !SMTP_USER || !SMTP_PASS || !SMTP_FROM) {
-    if (process.env.DEV_OTP_RETURN === "true") return { sent: false, otp };
+    if (devOtpReturnEnabled) return { sent: false, otp };
     return { sent: false, otp: null };
   }
 
@@ -29,6 +30,10 @@ async function sendOtpEmail({ email, otp, tempPassword }) {
     port: Number(SMTP_PORT),
     secure: Number(SMTP_PORT) === 465,
     auth: { user: SMTP_USER, pass: SMTP_PASS },
+    // Fail fast instead of hanging a long time on bad connectivity.
+    connectionTimeout: 10000,
+    greetingTimeout: 10000,
+    socketTimeout: 15000,
   });
 
   try {
@@ -41,7 +46,7 @@ async function sendOtpEmail({ email, otp, tempPassword }) {
     return { sent: true, otp: null };
   } catch (e) {
     console.error("sendOtpEmail error:", e?.message || e);
-    if (process.env.DEV_OTP_RETURN === "true") return { sent: false, otp };
+    if (devOtpReturnEnabled) return { sent: false, otp };
     return { sent: false, otp: null };
   }
 }
