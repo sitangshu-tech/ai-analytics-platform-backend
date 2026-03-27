@@ -1,5 +1,8 @@
 const { Pool } = require("pg");
+const dns = require("dns");
 require("dotenv").config();
+
+dns.setDefaultResultOrder("ipv4first");
 
 const rawConnectionString = process.env.DATABASE_URL || "";
 // Keep hosted DB SSL enabled, but avoid strict cert validation failures in common PaaS setups.
