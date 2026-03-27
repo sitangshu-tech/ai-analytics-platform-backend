@@ -32,6 +32,7 @@ async function sendOtpEmail({ email, otp, tempPassword }) {
       port,
       secure,
       auth: { user: SMTP_USER, pass: SMTP_PASS },
+      family: 4,
       // Fail fast instead of hanging a long time on bad connectivity.
       connectionTimeout: 10000,
       greetingTimeout: 10000,
