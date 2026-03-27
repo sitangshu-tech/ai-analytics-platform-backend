@@ -6,6 +6,7 @@ const pool = require("../config/db");
 const nodemailer = require("nodemailer");
 const { createOtp, verifyOtp } = require("../utils/otpStore");
 const auth = require("../middleware/auth");
+const dns = require("dns");
 
 const router = express.Router();
 const devOtpReturnEnabled = String(process.env.DEV_OTP_RETURN || "").toLowerCase() === "true";
@@ -34,6 +35,8 @@ async function sendOtpEmail({ email, otp, tempPassword }) {
     connectionTimeout: 10000,
     greetingTimeout: 10000,
     socketTimeout: 15000,
+    // Force IPv4 for environments that can't route IPv6 (prevents ENETUNREACH).
+    lookup: (hostname, _opts, cb) => dns.lookup(hostname, { family: 4 }, cb),
   });
 
   try {
