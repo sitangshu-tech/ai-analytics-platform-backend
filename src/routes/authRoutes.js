@@ -3,76 +3,24 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
 const pool = require("../config/db");
-const nodemailer = require("nodemailer");
+const { sendOtpViaResend } = require("../services/sendOtpEmail");
 const { createOtp, verifyOtp } = require("../utils/otpStore");
 const auth = require("../middleware/auth");
-const dns = require("dns");
 
 const router = express.Router();
 const devOtpReturnEnabled = String(process.env.DEV_OTP_RETURN || "").toLowerCase() === "true";
 const normalizeEmail = (value = "") => value.trim().toLowerCase();
 
 async function sendOtpEmail({ email, otp, tempPassword }) {
-  const {
-    SMTP_HOST,
-    SMTP_PORT,
-    SMTP_USER,
-    SMTP_PASS,
-    SMTP_FROM,
-  } = process.env;
+  try {
+    const result = await sendOtpViaResend({ to: email, otp, tempPassword });
+    if (result.ok) return { sent: true, otp: null };
 
-  if (!SMTP_HOST || !SMTP_PORT || !SMTP_USER || !SMTP_PASS || !SMTP_FROM) {
+    console.error("sendOtpEmail error:", result.error);
     if (devOtpReturnEnabled) return { sent: false, otp };
     return { sent: false, otp: null };
-  }
-
-  const createTransporter = ({ host, port, secure }) =>
-    nodemailer.createTransport({
-      host,
-      port,
-      secure,
-      auth: { user: SMTP_USER, pass: SMTP_PASS },
-      family: 4,
-      // Fail fast instead of hanging a long time on bad connectivity.
-      connectionTimeout: 10000,
-      greetingTimeout: 10000,
-      socketTimeout: 15000,
-      // Force IPv4 for environments that can't route IPv6 (prevents ENETUNREACH).
-      lookup: (hostname, _opts, cb) => dns.lookup(hostname, { family: 4 }, cb),
-    });
-
-  const sendMail = (transporter) =>
-    transporter.sendMail({
-      from: SMTP_FROM,
-      to: email,
-      subject: "Your signup OTP",
-      text: `Your signup OTP is: ${otp}. It expires in 10 minutes.\n\nTemporary password: ${tempPassword}\n\nPlease change it after login.`,
-    });
-
-  try {
-    const primaryPort = Number(SMTP_PORT);
-    const primary = createTransporter({ host: SMTP_HOST, port: primaryPort, secure: primaryPort === 465 });
-    await sendMail(primary);
-    return { sent: true, otp: null };
   } catch (e) {
-    const message = e?.message || String(e);
-    const isTimeout = /timeout/i.test(message);
-    const primaryPort = Number(SMTP_PORT);
-
-    // Common fix: if STARTTLS (587) times out, retry implicit TLS (465).
-    if (isTimeout && primaryPort !== 465) {
-      try {
-        const fallback = createTransporter({ host: SMTP_HOST, port: 465, secure: true });
-        await sendMail(fallback);
-        return { sent: true, otp: null };
-      } catch (e2) {
-        console.error("sendOtpEmail error:", e2?.message || e2);
-        if (devOtpReturnEnabled) return { sent: false, otp };
-        return { sent: false, otp: null };
-      }
-    }
-
-    console.error("sendOtpEmail error:", message);
+    console.error("sendOtpEmail error:", e?.message || e);
     if (devOtpReturnEnabled) return { sent: false, otp };
     return { sent: false, otp: null };
   }
@@ -91,9 +39,9 @@ router.post("/send-otp", async (req, res) => {
   const otp = createOtp({ purpose, email, meta: { tempPassword } });
   const result = await sendOtpEmail({ email, otp, tempPassword });
 
-  if (result.sent) return res.json({ message: "OTP sent to your Gmail. Please check and verify." });
+  if (result.sent) return res.json({ message: "OTP sent to your email. Please check and verify." });
   if (result.otp) return res.json({ message: "OTP generated (dev). Please use the OTP.", otp: result.otp });
-  return res.status(500).json({ message: "Failed to send OTP. Configure SMTP." });
+  return res.status(500).json({ message: "Failed to send OTP. Configure Resend (RESEND_API_KEY in backend env)." });
 });
 
 // Verify signup OTP -> create account and sign in
