@@ -1,13 +1,14 @@
 const express = require("express");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
-const crypto = require("crypto");
 const pool = require("../config/db");
 const { getSupabaseAdmin } = require("../config/supabase");
 const auth = require("../middleware/auth");
 
 const router = express.Router();
 const normalizeEmail = (value = "") => value.trim().toLowerCase();
+
+const passwordPolicy = /^(?=.*[A-Z])(?=.*\d).{8,}$/;
 
 router.post("/send-otp", async (req, res) => {
   const email = normalizeEmail(req.body?.email);
@@ -43,8 +44,13 @@ router.post("/send-otp", async (req, res) => {
 router.post("/register/verify", async (req, res) => {
   const email = normalizeEmail(req.body?.email);
   const otp = (req.body?.otp || "").toString().trim();
+  const password = (req.body?.password || "").toString();
   if (!email) return res.status(400).json({ message: "Email required" });
   if (!otp) return res.status(400).json({ message: "OTP required" });
+  if (!password) return res.status(400).json({ message: "Password required" });
+  if (!passwordPolicy.test(password)) {
+    return res.status(400).json({ message: "Password must be 8+ chars, 1 uppercase, 1 number" });
+  }
 
   const existingUser = await pool.query("SELECT id FROM users WHERE email=$1", [email]);
   if (existingUser.rows[0]) return res.status(400).json({ message: "Email already registered. Please sign in." });
@@ -76,11 +82,10 @@ router.post("/register/verify", async (req, res) => {
   const dup = await pool.query("SELECT id FROM users WHERE email=$1", [email]);
   if (dup.rows[0]) return res.status(400).json({ message: "Email already registered" });
 
-  const tempPassword = `Temp@${crypto.randomBytes(4).toString("hex")}`;
-  const placeholderPassword = await bcrypt.hash(tempPassword, 10);
+  const passwordHash = await bcrypt.hash(password, 10);
   const result = await pool.query(
     "INSERT INTO users (email, password, role, subscription_plan, usage_count) VALUES ($1,$2,'user','free',0) RETURNING id,email,role,subscription_plan",
-    [email, placeholderPassword]
+    [email, passwordHash]
   );
 
   const user = result.rows[0];
@@ -89,7 +94,6 @@ router.post("/register/verify", async (req, res) => {
     message: "Signup successful",
     token,
     user: { id: user.id, email: user.email, role: user.role, plan: user.subscription_plan },
-    tempPassword,
   });
 });
 
