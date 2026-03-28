@@ -23,6 +23,7 @@ router.post("/send-otp", async (req, res) => {
     });
   }
 
+  // Supabase sends the code in the email only if the Auth email template includes {{ .Token }} (see Supabase → Authentication → Email templates).
   const { error } = await supabase.auth.signInWithOtp({
     email,
     options: {
@@ -55,14 +56,21 @@ router.post("/register/verify", async (req, res) => {
     });
   }
 
-  const { error } = await supabase.auth.verifyOtp({
-    email,
-    token: otp,
-    type: "email",
-  });
+  let verifyErr = null;
+  const tryVerify = async (type) => {
+    const { error } = await supabase.auth.verifyOtp({ email, token: otp, type });
+    return error;
+  };
 
-  if (error) {
-    return res.status(400).json({ message: error.message || "Invalid OTP" });
+  verifyErr = await tryVerify("email");
+  if (verifyErr) verifyErr = await tryVerify("signup");
+
+  if (verifyErr) {
+    return res.status(400).json({
+      message:
+        verifyErr.message ||
+        "Invalid OTP. Use the 6-digit code from the email (not the long link). If the email has no code, add {{ .Token }} to your Supabase Auth email template.",
+    });
   }
 
   const dup = await pool.query("SELECT id FROM users WHERE email=$1", [email]);
