@@ -3,65 +3,73 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
 const pool = require("../config/db");
-const { sendOtpViaResend } = require("../services/sendOtpEmail");
-const { createOtp, verifyOtp } = require("../utils/otpStore");
+const { getSupabaseAdmin } = require("../config/supabase");
 const auth = require("../middleware/auth");
 
 const router = express.Router();
-const devOtpReturnEnabled = String(process.env.DEV_OTP_RETURN || "").toLowerCase() === "true";
 const normalizeEmail = (value = "") => value.trim().toLowerCase();
-
-async function sendOtpEmail({ email, otp, tempPassword }) {
-  try {
-    const result = await sendOtpViaResend({ to: email, otp, tempPassword });
-    if (result.ok) return { sent: true, otp: null };
-
-    console.error("sendOtpEmail error:", result.error);
-    if (devOtpReturnEnabled) return { sent: false, otp };
-    return { sent: false, otp: null };
-  } catch (e) {
-    console.error("sendOtpEmail error:", e?.message || e);
-    if (devOtpReturnEnabled) return { sent: false, otp };
-    return { sent: false, otp: null };
-  }
-}
 
 router.post("/send-otp", async (req, res) => {
   const email = normalizeEmail(req.body?.email);
   if (!email) return res.status(400).json({ message: "Email required" });
-  // Signup OTP only (sign-in uses password).
-  const purpose = "register";
 
   const existingUser = await pool.query("SELECT id FROM users WHERE email=$1", [email]);
   if (existingUser.rows[0]) return res.status(400).json({ message: "Email already registered. Please sign in." });
 
-  const tempPassword = `Temp@${crypto.randomBytes(4).toString("hex")}`; // temp password sent via email
-  const otp = createOtp({ purpose, email, meta: { tempPassword } });
-  const result = await sendOtpEmail({ email, otp, tempPassword });
+  const supabase = getSupabaseAdmin();
+  if (!supabase) {
+    return res.status(500).json({
+      message: "Supabase Auth not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY on the backend.",
+    });
+  }
 
-  if (result.sent) return res.json({ message: "OTP sent to your email. Please check and verify." });
-  if (result.otp) return res.json({ message: "OTP generated (dev). Please use the OTP.", otp: result.otp });
-  return res.status(500).json({ message: "Failed to send OTP. Configure Resend (RESEND_API_KEY in backend env)." });
+  const { error } = await supabase.auth.signInWithOtp({
+    email,
+    options: {
+      shouldCreateUser: true,
+    },
+  });
+
+  if (error) {
+    console.error("signInWithOtp error:", error.message);
+    return res.status(500).json({ message: error.message || "Failed to send OTP" });
+  }
+
+  return res.json({ message: "OTP sent to your email. Please check and verify." });
 });
 
-// Verify signup OTP -> create account and sign in
+// Verify Supabase email OTP -> create app user and sign in with JWT
 router.post("/register/verify", async (req, res) => {
   const email = normalizeEmail(req.body?.email);
   const otp = (req.body?.otp || "").toString().trim();
   if (!email) return res.status(400).json({ message: "Email required" });
   if (!otp) return res.status(400).json({ message: "OTP required" });
 
-  // Ensure email isn't already registered
   const existingUser = await pool.query("SELECT id FROM users WHERE email=$1", [email]);
   if (existingUser.rows[0]) return res.status(400).json({ message: "Email already registered. Please sign in." });
 
-  const meta = verifyOtp({ purpose: "register", email, value: otp });
-  if (!meta || !meta.tempPassword) return res.status(400).json({ message: "Invalid OTP" });
+  const supabase = getSupabaseAdmin();
+  if (!supabase) {
+    return res.status(500).json({
+      message: "Supabase Auth not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY on the backend.",
+    });
+  }
 
-  const existing = await pool.query("SELECT id FROM users WHERE email=$1", [email]);
-  if (existing.rows[0]) return res.status(400).json({ message: "Email already registered" });
+  const { error } = await supabase.auth.verifyOtp({
+    email,
+    token: otp,
+    type: "email",
+  });
 
-  const placeholderPassword = await bcrypt.hash(meta.tempPassword, 10);
+  if (error) {
+    return res.status(400).json({ message: error.message || "Invalid OTP" });
+  }
+
+  const dup = await pool.query("SELECT id FROM users WHERE email=$1", [email]);
+  if (dup.rows[0]) return res.status(400).json({ message: "Email already registered" });
+
+  const tempPassword = `Temp@${crypto.randomBytes(4).toString("hex")}`;
+  const placeholderPassword = await bcrypt.hash(tempPassword, 10);
   const result = await pool.query(
     "INSERT INTO users (email, password, role, subscription_plan, usage_count) VALUES ($1,$2,'user','free',0) RETURNING id,email,role,subscription_plan",
     [email, placeholderPassword]
@@ -73,6 +81,7 @@ router.post("/register/verify", async (req, res) => {
     message: "Signup successful",
     token,
     user: { id: user.id, email: user.email, role: user.role, plan: user.subscription_plan },
+    tempPassword,
   });
 });
 
@@ -89,7 +98,6 @@ router.post("/login", async (req, res) => {
 
   let ok = false;
   if (typeof user.password === "string" && user.password.length) {
-    // Support legacy plaintext passwords and upgrade them to bcrypt on next successful sign-in.
     if (user.password.startsWith("$2a$") || user.password.startsWith("$2b$") || user.password.startsWith("$2y$")) {
       ok = await bcrypt.compare(password, user.password);
     } else {
@@ -116,7 +124,6 @@ router.patch("/change-password", auth(), async (req, res) => {
   const { currentPassword, newPassword } = req.body;
   if (!currentPassword || !newPassword) return res.status(400).json({ message: "Current and new password required" });
 
-  // Keep same password policy used during signup.
   if (!/^(?=.*[A-Z])(?=.*\d).{8,}$/.test(newPassword)) {
     return res.status(400).json({ message: "New password must be 8+ chars, 1 uppercase, 1 number" });
   }
