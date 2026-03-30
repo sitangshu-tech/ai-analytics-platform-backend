@@ -10,10 +10,55 @@ const normalizeEmail = (value = "") => value.trim().toLowerCase();
 
 const passwordPolicy = /^(?=.*[A-Z])(?=.*\d).{8,}$/;
 const signupTokenTtlSeconds = 10 * 60;
+const otpRequestsByEmail = new Map();
+const otpRequestsByIp = new Map();
+const otpPerMinutePerEmail = 1;
+const otpPerHourPerEmail = 5;
+const otpPerHourPerIp = 25;
+
+function pruneOldRequests(store, now, windowMs) {
+  for (const [key, timestamps] of store.entries()) {
+    const fresh = timestamps.filter((ts) => now - ts < windowMs);
+    if (!fresh.length) store.delete(key);
+    else store.set(key, fresh);
+  }
+}
+
+function checkAndRecordOtpRateLimit(email, ip) {
+  const now = Date.now();
+  const oneMinute = 60 * 1000;
+  const oneHour = 60 * 60 * 1000;
+
+  pruneOldRequests(otpRequestsByEmail, now, oneHour);
+  pruneOldRequests(otpRequestsByIp, now, oneHour);
+
+  const emailEvents = otpRequestsByEmail.get(email) || [];
+  const ipEvents = otpRequestsByIp.get(ip) || [];
+  const emailLastMinute = emailEvents.filter((ts) => now - ts < oneMinute).length;
+  const emailLastHour = emailEvents.length;
+  const ipLastHour = ipEvents.length;
+
+  if (emailLastMinute >= otpPerMinutePerEmail) {
+    return { blocked: true, message: "Please wait 60 seconds before requesting another OTP." };
+  }
+  if (emailLastHour >= otpPerHourPerEmail) {
+    return { blocked: true, message: "Too many OTP requests for this email. Please try again after 1 hour." };
+  }
+  if (ipLastHour >= otpPerHourPerIp) {
+    return { blocked: true, message: "Too many OTP requests from your network. Please try again after 1 hour." };
+  }
+
+  otpRequestsByEmail.set(email, [...emailEvents, now]);
+  otpRequestsByIp.set(ip, [...ipEvents, now]);
+  return { blocked: false };
+}
 
 router.post("/send-otp", async (req, res) => {
   const email = normalizeEmail(req.body?.email);
   if (!email) return res.status(400).json({ message: "Email required" });
+  const clientIp = (req.headers["x-forwarded-for"] || req.ip || "unknown").toString().split(",")[0].trim();
+  const localLimit = checkAndRecordOtpRateLimit(email, clientIp);
+  if (localLimit.blocked) return res.status(429).json({ message: localLimit.message });
 
   const existingUser = await pool.query("SELECT id FROM users WHERE email=$1", [email]);
   if (existingUser.rows[0]) return res.status(400).json({ message: "Email already registered. Please sign in." });
@@ -35,7 +80,11 @@ router.post("/send-otp", async (req, res) => {
 
   if (error) {
     console.error("signInWithOtp error:", error.message);
-    return res.status(500).json({ message: error.message || "Failed to send OTP" });
+    const message = String(error.message || "");
+    if (/rate limit/i.test(message)) {
+      return res.status(429).json({ message: "Too many OTP requests. Please wait and try again." });
+    }
+    return res.status(500).json({ message: message || "Failed to send OTP" });
   }
 
   return res.json({ message: "OTP sent to your email. Please check and verify." });
