@@ -9,6 +9,7 @@ const router = express.Router();
 const normalizeEmail = (value = "") => value.trim().toLowerCase();
 
 const passwordPolicy = /^(?=.*[A-Z])(?=.*\d).{8,}$/;
+const signupTokenTtlSeconds = 10 * 60;
 
 router.post("/send-otp", async (req, res) => {
   const email = normalizeEmail(req.body?.email);
@@ -40,17 +41,22 @@ router.post("/send-otp", async (req, res) => {
   return res.json({ message: "OTP sent to your email. Please check and verify." });
 });
 
-// Verify Supabase email OTP -> create app user and sign in with JWT
-router.post("/register/verify", async (req, res) => {
+async function verifySupabaseOtp({ supabase, email, otp }) {
+  const tryVerify = async (type) => {
+    const { error } = await supabase.auth.verifyOtp({ email, token: otp, type });
+    return error;
+  };
+  let err = await tryVerify("email");
+  if (err) err = await tryVerify("signup");
+  return err;
+}
+
+// Step 1: Verify OTP only -> issue short-lived signup token
+router.post("/register/verify-otp", async (req, res) => {
   const email = normalizeEmail(req.body?.email);
   const otp = (req.body?.otp || "").toString().trim();
-  const password = (req.body?.password || "").toString();
   if (!email) return res.status(400).json({ message: "Email required" });
   if (!otp) return res.status(400).json({ message: "OTP required" });
-  if (!password) return res.status(400).json({ message: "Password required" });
-  if (!passwordPolicy.test(password)) {
-    return res.status(400).json({ message: "Password must be 8+ chars, 1 uppercase, 1 number" });
-  }
 
   const existingUser = await pool.query("SELECT id FROM users WHERE email=$1", [email]);
   if (existingUser.rows[0]) return res.status(400).json({ message: "Email already registered. Please sign in." });
@@ -62,14 +68,7 @@ router.post("/register/verify", async (req, res) => {
     });
   }
 
-  let verifyErr = null;
-  const tryVerify = async (type) => {
-    const { error } = await supabase.auth.verifyOtp({ email, token: otp, type });
-    return error;
-  };
-
-  verifyErr = await tryVerify("email");
-  if (verifyErr) verifyErr = await tryVerify("signup");
+  const verifyErr = await verifySupabaseOtp({ supabase, email, otp });
 
   if (verifyErr) {
     return res.status(400).json({
@@ -79,8 +78,33 @@ router.post("/register/verify", async (req, res) => {
     });
   }
 
+  const signupToken = jwt.sign({ purpose: "signup", email }, process.env.JWT_SECRET, { expiresIn: signupTokenTtlSeconds });
+  return res.json({ message: "OTP verified", signupToken });
+});
+
+// Step 2: Create account with password -> issue app JWT
+router.post("/register/complete", async (req, res) => {
+  const signupToken = (req.body?.signupToken || "").toString();
+  const password = (req.body?.password || "").toString();
+  if (!signupToken) return res.status(400).json({ message: "signupToken required" });
+  if (!password) return res.status(400).json({ message: "Password required" });
+  if (!passwordPolicy.test(password)) {
+    return res.status(400).json({ message: "Password must be 8+ chars, 1 uppercase, 1 number" });
+  }
+
+  let payload;
+  try {
+    payload = jwt.verify(signupToken, process.env.JWT_SECRET);
+  } catch {
+    return res.status(401).json({ message: "Signup token expired. Please request OTP again." });
+  }
+  if (payload?.purpose !== "signup" || !payload?.email) {
+    return res.status(401).json({ message: "Invalid signup token" });
+  }
+
+  const email = normalizeEmail(payload.email);
   const dup = await pool.query("SELECT id FROM users WHERE email=$1", [email]);
-  if (dup.rows[0]) return res.status(400).json({ message: "Email already registered" });
+  if (dup.rows[0]) return res.status(400).json({ message: "Email already registered. Please sign in." });
 
   const passwordHash = await bcrypt.hash(password, 10);
   const result = await pool.query(
@@ -90,11 +114,36 @@ router.post("/register/verify", async (req, res) => {
 
   const user = result.rows[0];
   const token = jwt.sign({ id: user.id, role: user.role, email: user.email }, process.env.JWT_SECRET, { expiresIn: "7d" });
-  res.json({
-    message: "Signup successful",
-    token,
-    user: { id: user.id, email: user.email, role: user.role, plan: user.subscription_plan },
-  });
+  return res.json({ message: "Signup successful", token, user: { id: user.id, email: user.email, role: user.role, plan: user.subscription_plan } });
+});
+
+// Backwards compatibility: if older frontend calls /register/verify with password, treat it as verify+complete.
+router.post("/register/verify", async (req, res) => {
+  const email = normalizeEmail(req.body?.email);
+  const otp = (req.body?.otp || "").toString().trim();
+  const password = (req.body?.password || "").toString();
+  if (!email) return res.status(400).json({ message: "Email required" });
+  if (!otp) return res.status(400).json({ message: "OTP required" });
+  if (!password) return res.status(400).json({ message: "Password required" });
+
+  const supabase = getSupabaseAdmin();
+  if (!supabase) {
+    return res.status(500).json({
+      message: "Supabase Auth not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY on the backend.",
+    });
+  }
+  const verifyErr = await verifySupabaseOtp({ supabase, email, otp });
+  if (verifyErr) {
+    return res.status(400).json({
+      message:
+        verifyErr.message ||
+        "Invalid OTP. Use the 6-digit code from the email (not the long link). If the email has no code, add {{ .Token }} to your Supabase Auth email template.",
+    });
+  }
+
+  // Create user immediately
+  req.body.signupToken = jwt.sign({ purpose: "signup", email }, process.env.JWT_SECRET, { expiresIn: signupTokenTtlSeconds });
+  return router.handle({ ...req, url: "/register/complete", method: "POST" }, res);
 });
 
 // Sign in with email + password only
